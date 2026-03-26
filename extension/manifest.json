@@ -1,10 +1,18 @@
 {
   "manifest_version": 3,
   "name": "OTT View Tracker",
-  "version": "1.0",
-  "permissions": ["activeTab", "scripting", "downloads"],
+  "version": "1.1",
+  "permissions": ["activeTab", "scripting"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "popup.html"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.disneyplus.com/*"],
+      "js": ["disney-bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
 }
