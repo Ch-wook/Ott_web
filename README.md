@@ -20,9 +20,9 @@ OTT 시청 기록을 통합 관리하기 위한 프로젝트입니다.
 ```bash
 ott-syncplay-project/
 ├─ extension/
-  ├─ README.md
-  ├─ manifest.json
-  ├─ popup.html
-  ├─ popup.js
-  ├─ disney-bridge.js
-  └─ README.md
+|  ├─ README.md
+|  ├─ manifest.json
+|  ├─ popup.html
+|  ├─ popup.js
+|  └─disney-bridge.js
+└─ README.md
