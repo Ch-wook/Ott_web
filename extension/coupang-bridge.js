@@ -95,9 +95,29 @@
     };
   }
 
+  // URL 기반 영화 여부 판별
+  // pathname에 /movie 포함 또는 query에 type=MOVIE 포함
+  function isCoupangMovie() {
+    try {
+      const pathname = location.pathname || "";
+      const search = location.search || "";
+      return (
+        /\/movie(\/|$)/i.test(pathname) ||
+        /[?&]type=MOVIE/i.test(search)
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
   window.OTTPlatformBridges.CoupangPlay = {
     extract({ state, video, helpers }) {
       const { cleanText, getMetaContent, splitTitle, parseTimeToSeconds } = helpers;
+
+      // ------------------------------
+      // 영화 여부 사전 판별
+      // ------------------------------
+      const isMovie = isCoupangMovie();
 
       // ------------------------------
       // 제목 / 상세 추출
@@ -184,6 +204,13 @@
             state.subTitle = parsed.subTitle;
           }
         }
+      }
+
+      // ------------------------------
+      // 영화인데 subTitle이 없으면 "영화" 세팅
+      // ------------------------------
+      if (isMovie && state.mainTitle && !state.subTitle) {
+        state.subTitle = "영화";
       }
 
       // ------------------------------
