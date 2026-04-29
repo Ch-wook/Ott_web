@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "../../../../../main_project"
+		},
+		{
+			"path": "../../.."
+		}
+	],
+	"settings": {
+		"java.compile.nullAnalysis.mode": "automatic"
+	}
+}
