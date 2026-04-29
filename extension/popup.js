@@ -1,14 +1,5 @@
 const API_BASE_URL = "http://localhost:8080";
 
-// 플랫폼별 bridge 파일 매핑
-const PLATFORM_BRIDGE_FILES = {
-  Netflix: "netflix-bridge.js",
-  DisneyPlus: "disney-bridge.js",
-  CoupangPlay: "coupang-bridge.js",
-  Watcha: "watcha-bridge.js",
-  Wavve: "wavve-bridge.js",
-};
-
 // 팝업 버튼 클릭 시 실행
 document.getElementById("extractBtn").addEventListener("click", handleExtract);
 
@@ -20,32 +11,10 @@ async function handleExtract() {
     // 현재 활성 탭 가져오기
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-    if (!tab?.id || !tab?.url) {
-      resultDiv.innerText = "현재 탭 정보를 가져오지 못했습니다.";
-      return;
-    }
-
-    // 현재 URL 기준으로 플랫폼 판별
-    const platform = detectPlatform(tab.url);
-
-    if (!platform) {
-      resultDiv.innerText = "지원하지 않는 OTT 페이지입니다.";
-      return;
-    }
-
-    // 플랫폼별 bridge 파일 먼저 주입
-    const bridgeFile = PLATFORM_BRIDGE_FILES[platform];
-    if (bridgeFile) {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: [bridgeFile],
-      });
-    }
-
     // 현재 페이지에 extractVideoInfo 함수 주입 후 결과 받기
     const injectionResults = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: extractVideoInfo,
+      function: extractVideoInfo,
     });
 
     const data = injectionResults?.[0]?.result;
@@ -65,7 +34,7 @@ async function handleExtract() {
       currentTime: data.currentTime,
       duration: data.duration,
       url: data.url,
-      watchedAt: new Date().toISOString(),
+      watchedAt: new Date().toISOString()
     };
 
     // 백엔드 서버로 시청 기록 전송
@@ -93,24 +62,6 @@ async function handleExtract() {
   }
 }
 
-// URL 기준 플랫폼 판별
-function detectPlatform(url) {
-  try {
-    const host = new URL(url).hostname;
-
-    if (host.includes("netflix.com")) return "Netflix";
-    if (host.includes("disneyplus.com")) return "DisneyPlus";
-    if (host.includes("coupangplay.com")) return "CoupangPlay";
-    if (host.includes("watcha.com")) return "Watcha";
-    if (host.includes("wavve.com")) return "Wavve";
-    if (host.includes("tving.com")) return "TVING";
-
-    return null;
-  } catch (e) {
-    return null;
-  }
-}
-
 function extractVideoInfo() {
   const host = location.hostname;
   let platform = "Unknown";
@@ -118,13 +69,16 @@ function extractVideoInfo() {
   // 플랫폼 판별
   if (host.includes("netflix.com")) platform = "Netflix";
   else if (host.includes("disneyplus.com")) platform = "DisneyPlus";
-  else if (host.includes("coupangplay.com")) platform = "CoupangPlay";
-  else if (host.includes("watcha.com")) platform = "Watcha";
-  else if (host.includes("wavve.com")) platform = "Wavve";
-  else if (host.includes("tving.com")) platform = "TVING";
 
-  // bridge 저장소
-  const bridges = window.OTTPlatformBridges || {};
+  const video = document.querySelector("video");
+
+  let mainTitle = "";
+  let subTitle = "";
+  let progress = null;
+
+  // 기본 currentTime / duration
+  let extractedCurrentTime = video ? Math.floor(video.currentTime) : null;
+  let extractedDuration = video ? Math.floor(video.duration) : null;
 
   // ------------------------------
   // 공통 유틸 함수들
@@ -134,10 +88,10 @@ function extractVideoInfo() {
   function parseTimeToSeconds(text) {
     if (!text) return null;
 
-    const clean = String(text).trim().replace(/[^\d:]/g, "");
+    const clean = String(text).trim();
     const parts = clean.split(":").map(Number);
 
-    if (!clean || parts.some(isNaN)) return null;
+    if (parts.some(isNaN)) return null;
 
     if (parts.length === 2) {
       const [mm, ss] = parts;
@@ -167,15 +121,13 @@ function extractVideoInfo() {
     return String(text || "").replace(/\s+/g, " ").trim();
   }
 
-  // 메타 태그 content 읽기
-  function getMetaContent(selector) {
-    return cleanText(document.querySelector(selector)?.content || "");
-  }
-
-  // 플랫폼 bridge 가 심어둔 메타 데이터 읽기
-  function readBridgeMeta(attributeName) {
+  // disney-bridge.js 가 심어둔 메타 데이터 읽기
+  function readDisneyMeta() {
     try {
-      const raw = document.documentElement?.getAttribute(attributeName);
+      const raw =
+        document.documentElement?.dataset?.ottDisneyMeta ||
+        document.documentElement?.getAttribute("data-ott-disney-meta");
+
       if (!raw) return null;
       return JSON.parse(raw);
     } catch (e) {
@@ -183,187 +135,314 @@ function extractVideoInfo() {
     }
   }
 
-  // 요소가 실제로 보이는지 검사
-  function isVisible(el) {
-    if (!el) return false;
+  // 디즈니에서 상세 후보를 찾을 때,
+  // 자막/오디오 설정창 텍스트인지 판별해서 제외
+  function isDisneyUiNoise(text, el) {
+    const cleaned = cleanText(text);
+    const classAndId = `${el?.className || ""} ${el?.id || ""}`;
 
-    const style = window.getComputedStyle(el);
-    const rect = el.getBoundingClientRect();
+    if (!cleaned) return true;
 
-    return (
-      style.display !== "none" &&
-      style.visibility !== "hidden" &&
-      style.opacity !== "0" &&
-      rect.width > 0 &&
-      rect.height > 0
-    );
-  }
-
-  // 실제 재생용 video 고르기
-  // 광고용 / 숨김 / 0x0 video 대응
-  function getBestVideoElement() {
-    const videos = [...document.querySelectorAll("video")];
-    if (!videos.length) return null;
-
-    const scoredVideos = videos.map((video, index) => {
-      const rect = video.getBoundingClientRect();
-      const area = rect.width * rect.height;
-
-      let score = 0;
-
-      if (isVisible(video)) score += 1000000;
-      if (Number.isFinite(video.currentTime) && video.currentTime > 0) score += 300000;
-      if (Number.isFinite(video.duration) && video.duration > 0) score += 300000;
-      if (video.paused === false) score += 200000;
-
-      score += area;
-
-      return {
-        video,
-        score,
-        index,
-      };
-    });
-
-    scoredVideos.sort((a, b) => b.score - a.score);
-    return scoredVideos[0]?.video || videos[0] || null;
-  }
-
-  // 공통 제목 분리
-  function splitTitle(rawTitle) {
-    let value = cleanText(rawTitle);
-
-    value = value
-      .replace(/\|\s*Netflix\s*$/i, "")
-      .replace(/\|\s*넷플릭스\s*$/i, "")
-      .replace(/\|\s*Disney\+\s*$/i, "")
-      .replace(/\|\s*디즈니\+\s*$/i, "")
-      .replace(/\|\s*Coupang Play\s*$/i, "")
-      .replace(/\|\s*쿠팡플레이\s*$/i, "")
-      .replace(/\|\s*WATCHA\s*$/i, "")
-      .replace(/\|\s*왓챠\s*$/i, "")
-      .replace(/\|\s*wavve\s*$/i, "")
-      .replace(/\|\s*웨이브\s*$/i, "")
-      .replace(/\|\s*TVING\s*$/i, "")
-      .replace(/\|\s*티빙\s*$/i, "")
-      .trim();
-
-    if (!value) {
-      return {
-        title: "",
-        subTitle: "",
-      };
+    // 설정창 관련 클래스/아이디는 전부 제외
+    if (
+      /audio-subtitles|subtitleTrackPicker|audioTrackPicker|options-picker|drawer-content|audio-subtitles-control|audio-subtitles-drawer/i.test(classAndId)
+    ) {
+      return true;
     }
 
-    // ":" 기준으로 제목/상세 분리
-    if (value.includes(":")) {
-      const parts = value.split(":");
-      return {
-        title: cleanText(parts[0]),
-        subTitle: cleanText(parts.slice(1).join(":")),
-      };
+    // 자막/오디오 관련 텍스트도 제외
+    if (
+      /Audio Options|Subtitle Track Picker|Audio Track Picker|자막|오디오|일시 중지됨|꺼짐|\[CC\]|English|한국어/i.test(cleaned)
+    ) {
+      return true;
     }
 
-    // 시즌/화수 패턴 기준 분리
-    const splitRegex = /(시즌\s*\d+|파트\s*\d+|제\s*\d+\s*화|\d+화|S\d+E\d+|Episode\s*\d+)/i;
-    const match = value.match(splitRegex);
-
-    if (match && match.index > 0) {
-      return {
-        title: cleanText(value.substring(0, match.index)),
-        subTitle: cleanText(value.substring(match.index)),
-      };
+    // 디즈니 로고나 잡 UI 문구 제외
+    if (
+      cleaned.includes("Audio Options") ||
+      cleaned.includes("Disney+") ||
+      cleaned.includes("디즈니+")
+    ) {
+      return true;
     }
 
-    return {
-      title: value,
-      subTitle: "",
-    };
+    return false;
   }
 
-  // 공통 슬라이더 기반 진도 계산
-  function applyCommonSliderProgress(state) {
-    const sliderCandidates = [
-      ...document.querySelectorAll(".scrubber-slider"),
-      ...document.querySelectorAll("[role='slider']"),
-      ...document.querySelectorAll("[aria-valuenow][aria-valuemax]"),
-      ...document.querySelectorAll("input[type='range']"),
+  // 디즈니 상세(subTitle) fallback 추출
+  function extractDisneyPlusSubTitle(rawTitle) {
+    const candidates = [];
+    const seen = new Set();
+
+    // 후보 추가 함수
+    function addCandidate(text, el = null) {
+      const cleaned = cleanText(text);
+      if (!cleaned) return;
+      if (seen.has(cleaned)) return;
+      if (isDisneyUiNoise(cleaned, el)) return;
+
+      seen.add(cleaned);
+      candidates.push(cleaned);
+    }
+
+    // 후보가 있을 법한 셀렉터들
+    const selectors = [
+      '[data-testid*="episode"]',
+      '[data-testid*="title"]',
+      '[data-testid*="subtitle"]',
+      '[aria-label*="episode" i]',
+      '[aria-label*="subtitle" i]',
+      '[class*="episode"]',
+      '[class*="subtitle"]',
+      '[class*="sub-title"]',
+      '[class*="metadata"]',
+      "h1",
+      "h2",
+      "h3"
     ];
 
-    for (const slider of sliderCandidates) {
-      const now = parseFloat(slider.getAttribute("aria-valuenow") || slider.value);
-      const max = parseFloat(slider.getAttribute("aria-valuemax") || slider.max);
+    // 화면 요소에서 후보 수집
+    selectors.forEach(selector => {
+      document.querySelectorAll(selector).forEach(el => {
+        addCandidate(el.innerText || el.textContent || "", el);
+      });
+    });
 
-      if (isNaN(now) || isNaN(max) || max <= 0) continue;
+    // 메타 태그에서도 후보 수집
+    addCandidate(document.querySelector('meta[property="og:title"]')?.content);
+    addCandidate(document.querySelector('meta[name="twitter:title"]')?.content);
+    addCandidate(document.querySelector('meta[name="description"]')?.content);
+    addCandidate(document.querySelector('meta[property="og:description"]')?.content);
 
-      // max가 100 이하면 퍼센트 단위로 간주
-      if (max <= 100) {
-        state.progress = now.toFixed(2);
-        return;
+    // script 내부 JSON/문자열에서도 에피소드 정보 패턴 탐색
+    const jsonTexts = [...document.querySelectorAll('script[type="application/ld+json"], script')]
+      .map(script => script.textContent || "")
+      .slice(0, 30);
+
+    jsonTexts.forEach(text => {
+      const patterns = [
+        /"episodeTitle"\s*:\s*"([^"]+)"/i,
+        /"subtitle"\s*:\s*"([^"]+)"/i,
+        /"subTitle"\s*:\s*"([^"]+)"/i,
+        /"episodeNumber"\s*:\s*"([^"]+)"/i,
+        /"episodeNumber"\s*:\s*([0-9]+)/i,
+        /"seasonNumber"\s*:\s*"([^"]+)"/i,
+        /"seasonNumber"\s*:\s*([0-9]+)/i
+      ];
+
+      patterns.forEach(pattern => {
+        const match = text.match(pattern);
+        if (match && match[1]) addCandidate(match[1]);
+      });
+    });
+
+    // 최종 필터
+    const filtered = candidates.filter(text => {
+      if (!text) return false;
+      if (text === rawTitle) return false;
+      if (text === document.title) return false;
+      if (text === mainTitle) return false;
+      if (/^디즈니\+?$/i.test(text)) return false;
+      if (text.length > 120) return false;
+      return true;
+    });
+
+    // 시즌/화수 패턴이 있는 강한 후보만 채택
+    const strongCandidate = filtered.find(text =>
+      /(시즌\s*\d+|파트\s*\d+|\d+화|S\d+E\d+|Episode\s*\d+)/i.test(text)
+    );
+
+    if (strongCandidate) return strongCandidate;
+
+    // 애매하면 억지로 상세를 넣지 않음
+    return "";
+  }
+
+  // ------------------------------
+  // Netflix 처리
+  // ------------------------------
+  if (platform === "Netflix") {
+    // [개선] 광고/노란 구간 대응:
+    // 재생바 슬라이더 값으로 진도 계산
+    const slider = document.querySelector(".scrubber-slider, [role='slider']");
+    if (slider) {
+      const now = parseFloat(slider.getAttribute("aria-valuenow"));
+      const max = parseFloat(slider.getAttribute("aria-valuemax"));
+
+      if (!isNaN(now) && !isNaN(max) && max > 0) {
+        // max가 100 이하면 이미 퍼센트 단위
+        if (max <= 100) {
+          progress = now.toFixed(2);
+        } else {
+          // max가 100보다 크면 초 단위로 판단
+          progress = ((now / max) * 100).toFixed(2);
+          extractedCurrentTime = Math.floor(now);
+          extractedDuration = Math.floor(max);
+        }
+      }
+    }
+
+    // 슬라이더 실패 시 video 태그로 백업
+    if (!progress && video && video.duration > 0) {
+      progress = ((video.currentTime / video.duration) * 100).toFixed(2);
+      extractedCurrentTime = Math.floor(video.currentTime);
+      extractedDuration = Math.floor(video.duration);
+    }
+
+    // 제목 추출
+    let rawTitle = document.title || "";
+    if (rawTitle === "Netflix" || rawTitle === "넷플릭스") {
+      const titleEl =
+        document.querySelector('[data-uia="video-title"]') ||
+        document.querySelector(".video-title");
+      if (titleEl) rawTitle = titleEl.innerText;
+    }
+
+    // 불필요한 문자열 제거
+    rawTitle = rawTitle.replace(/넷플릭스/g, "").replace(/Netflix/g, "").replace(/\|/g, "").trim();
+    rawTitle = rawTitle.replace(/^-|-$/g, "").trim();
+
+    // ":" 기준으로 제목/상세 분리
+    if (rawTitle.includes(":")) {
+      const parts = rawTitle.split(":");
+      mainTitle = parts[0].trim();
+      subTitle = parts.slice(1).join(":").trim();
+    } else {
+      // 시즌/화수 패턴 기준 분리
+      const splitRegex = /(시즌\s*\d+|파트\s*\d+|\d+화|S\d+E\d+|Episode\s*\d+)/;
+      const match = rawTitle.match(splitRegex);
+      if (match && match.index > 0) {
+        mainTitle = rawTitle.substring(0, match.index).trim();
+        subTitle = rawTitle.substring(match.index).trim();
+      } else {
+        mainTitle = rawTitle;
+      }
+    }
+  }
+
+  // ------------------------------
+  // DisneyPlus 처리
+  // ------------------------------
+  if (platform === "DisneyPlus") {
+    const disneyMeta = readDisneyMeta();
+    const progressBar = document.querySelector("progress-bar");
+    const timeRemainingIndicator = document.querySelector("time-remaining-indicator");
+
+    // 1차: shadow DOM 진행바 값 추출
+    if (progressBar) {
+      const thumb = getShadowElement(progressBar, ".progress-bar__thumb");
+      const progressEl = getShadowElement(progressBar, ".progress-bar__progress");
+
+      if (thumb) {
+        const now = parseFloat(thumb.getAttribute("aria-valuenow"));
+        const max = parseFloat(thumb.getAttribute("aria-valuemax"));
+
+        if (!isNaN(now)) extractedCurrentTime = Math.floor(now);
+        if (!isNaN(max) && max > 0) extractedDuration = Math.floor(max);
+
+        if (!isNaN(now) && !isNaN(max) && max > 0) {
+          progress = ((now / max) * 100).toFixed(2);
+        }
       }
 
-      // max가 100보다 크면 초 단위로 간주
-      state.extractedCurrentTime = Math.floor(now);
-      state.extractedDuration = Math.floor(max);
-      state.progress = ((now / max) * 100).toFixed(2);
-      return;
+      // thumb 값 실패 시 progress width(%) 사용
+      if ((!progress || isNaN(parseFloat(progress))) && progressEl) {
+        const widthPercent = parseFloat(progressEl.style.width);
+        if (!isNaN(widthPercent)) {
+          progress = widthPercent.toFixed(2);
+        }
+      }
     }
-  }
 
-  const video = getBestVideoElement();
+    // 2차: 남은 시간 + 현재시간으로 전체 duration 복원
+    if ((!extractedDuration || !isFinite(extractedDuration)) && timeRemainingIndicator) {
+      const remainingTextEl = getShadowElement(timeRemainingIndicator, ".time-remaining-indicator");
+      const remainingText = remainingTextEl ? remainingTextEl.textContent.trim() : "";
+      const remainingSeconds = parseTimeToSeconds(remainingText);
 
-  const state = {
-    mainTitle: "",
-    subTitle: "",
-    progress: null,
-    extractedCurrentTime: video && Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : null,
-    extractedDuration: video && Number.isFinite(video.duration) && video.duration > 0 ? Math.floor(video.duration) : null,
-  };
-
-  // 공통 기본 진도 계산
-  if (
-    state.extractedCurrentTime !== null &&
-    state.extractedDuration !== null &&
-    state.extractedDuration > 0
-  ) {
-    state.progress = ((state.extractedCurrentTime / state.extractedDuration) * 100).toFixed(2);
-  }
-
-  // 공통 슬라이더 보정
-  applyCommonSliderProgress(state);
-
-  // 공통 제목 기본값
-  const defaultTitle = splitTitle(document.title || "");
-  if (defaultTitle.title) state.mainTitle = defaultTitle.title;
-  if (defaultTitle.subTitle) state.subTitle = defaultTitle.subTitle;
-
-  // ------------------------------
-  // 플랫폼별 bridge 처리
-  // ------------------------------
-  if (bridges[platform] && typeof bridges[platform].extract === "function") {
-    try {
-      bridges[platform].extract({
-        state,
-        video,
-        helpers: {
-          parseTimeToSeconds,
-          getShadowElement,
-          cleanText,
-          getMetaContent,
-          readBridgeMeta,
-          splitTitle,
-        },
-      });
-    } catch (e) {
-      console.error(`${platform} bridge error:`, e);
+      if (remainingSeconds !== null && extractedCurrentTime !== null && isFinite(extractedCurrentTime)) {
+        extractedDuration = Math.floor(extractedCurrentTime + remainingSeconds);
+      }
     }
-  }
 
-  // bridge가 없을 때 최소 fallback
-  if (!state.mainTitle) {
-    const fallback = splitTitle(document.title || "");
-    state.mainTitle = fallback.title || "";
-    if (!state.subTitle) state.subTitle = fallback.subTitle || "";
+    // 3차: video 태그 백업
+    if ((extractedCurrentTime === null || !isFinite(extractedCurrentTime)) && video && isFinite(video.currentTime)) {
+      extractedCurrentTime = Math.floor(video.currentTime);
+    }
+
+    if (
+      (extractedDuration === null || !isFinite(extractedDuration) || extractedDuration <= 0) &&
+      video &&
+      isFinite(video.duration) &&
+      video.duration > 0
+    ) {
+      extractedDuration = Math.floor(video.duration);
+    }
+
+    // 4차: currentTime / duration으로 progress 계산
+    if (
+      (!progress || isNaN(parseFloat(progress))) &&
+      extractedCurrentTime !== null &&
+      extractedDuration !== null &&
+      extractedDuration > 0
+    ) {
+      progress = ((extractedCurrentTime / extractedDuration) * 100).toFixed(2);
+    }
+
+    // bridge 메타 우선 사용
+    if (disneyMeta) {
+      if (disneyMeta.title) mainTitle = disneyMeta.title;
+      if (disneyMeta.subTitle) subTitle = disneyMeta.subTitle;
+
+      // runtimeMs가 있으면 duration 보정
+      if (
+        (!extractedDuration || !isFinite(extractedDuration) || extractedDuration <= 0) &&
+        disneyMeta.runtimeMs
+      ) {
+        extractedDuration = Math.floor(disneyMeta.runtimeMs / 1000);
+      }
+
+      // [중요] 영화는 상세가 비어 있는 경우가 많음
+      // 이때 fallback을 타면 "자막 꺼짐" 같은 잡텍스트가 들어오므로 차단
+      if (disneyMeta.programType === "movie" && !disneyMeta.subTitle) {
+        subTitle = "";
+      }
+    }
+
+    // 제목 fallback
+    if (!mainTitle) {
+      let rawTitle = document.title || "";
+      rawTitle = rawTitle
+        .replace(/\|\s*디즈니\+\s*$/i, "")
+        .replace(/\|\s*Disney\+\s*$/i, "")
+        .trim();
+
+      if (rawTitle.includes(":")) {
+        const parts = rawTitle.split(":");
+        mainTitle = parts[0].trim();
+        if (!subTitle) subTitle = parts.slice(1).join(":").trim();
+      } else {
+        const splitRegex = /(시즌\s*\d+|파트\s*\d+|\d+화|S\d+E\d+|Episode\s*\d+)/;
+        const match = rawTitle.match(splitRegex);
+        if (match && match.index > 0) {
+          mainTitle = rawTitle.substring(0, match.index).trim();
+          if (!subTitle) subTitle = rawTitle.substring(match.index).trim();
+        } else {
+          mainTitle = rawTitle;
+        }
+      }
+    }
+
+    // 상세 fallback
+    // 영화는 fallback 금지
+    // 시리즈만 subtitle 후보 추출 허용
+    if (!subTitle) {
+      if (disneyMeta?.programType === "movie") {
+        subTitle = "";
+      } else {
+        subTitle = extractDisneyPlusSubTitle(mainTitle);
+      }
+    }
   }
 
   // ------------------------------
@@ -372,59 +451,38 @@ function extractVideoInfo() {
 
   // 띄어쓰기 교정
   // 예: "3화나초" -> "3화 나초"
-  if (state.subTitle) {
-    state.subTitle = state.subTitle.replace(
-      /(화|시즌\s*\d+|파트\s*\d+|S\d+E\d+|Episode\s*\d+)(?=[^\s:])/gi,
+  if (subTitle) {
+    subTitle = subTitle.replace(
+      /(화|시즌\s*\d+|파트\s*\d+|S\d+E\d+|Episode\s*\d+)(?=[^\s:])/g,
       "$1 "
     );
-    state.subTitle = state.subTitle.replace(/\s{2,}/g, " ").trim();
+    subTitle = subTitle.replace(/\s{2,}/g, " ").trim();
   }
 
   // 제목이 끝까지 없으면 실패 문구
-  if (!state.mainTitle || state.mainTitle === "") {
-    state.mainTitle = "제목 인식 실패";
-    state.subTitle = "영상 화면을 클릭한 뒤 다시 시도해주세요";
-  }
-
-  // 숫자 보정
-  if (!Number.isFinite(state.extractedCurrentTime)) state.extractedCurrentTime = null;
-  if (!Number.isFinite(state.extractedDuration) || state.extractedDuration <= 0) {
-    state.extractedDuration = null;
-  }
-
-  // progress 재계산
-  if (
-    (state.progress === null || isNaN(parseFloat(state.progress))) &&
-    state.extractedCurrentTime !== null &&
-    state.extractedDuration !== null &&
-    state.extractedDuration > 0
-  ) {
-    state.progress = ((state.extractedCurrentTime / state.extractedDuration) * 100).toFixed(2);
+  if (!mainTitle || mainTitle === "") {
+    mainTitle = "제목 인식 실패";
+    subTitle = "영상 화면을 클릭한 뒤 다시 시도해주세요";
   }
 
   // 진도 100% 초과 방지
-  if (state.progress !== null && !isNaN(parseFloat(state.progress))) {
-    let numericProgress = parseFloat(state.progress);
-
-    if (numericProgress < 0) numericProgress = 0;
-    if (numericProgress > 100) numericProgress = 100;
-
-    state.progress = numericProgress.toFixed(2);
+  if (progress !== null && !isNaN(parseFloat(progress)) && parseFloat(progress) > 100) {
+    progress = "100.00";
   }
 
   // progress 값이 아예 없으면 0 처리
-  if (state.progress === null) {
-    state.progress = "0";
+  if (progress === null) {
+    progress = "0";
   }
 
   // 최종 반환
   return {
     platform: platform,
-    title: state.mainTitle,
-    subTitle: state.subTitle,
-    progress: state.progress,
-    currentTime: state.extractedCurrentTime,
-    duration: state.extractedDuration,
-    url: location.href,
+    title: mainTitle,
+    subTitle: subTitle,
+    progress: progress,
+    currentTime: extractedCurrentTime,
+    duration: extractedDuration,
+    url: location.href
   };
 }
